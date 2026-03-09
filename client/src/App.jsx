@@ -386,14 +386,12 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
 
   useEffect(() => { fetchCustomers() }, [fetchCustomers])
 
-  // SSE: รับ push event จาก server ทันทีที่มีการเปลี่ยนแปลง
+  // Polling ทุก 10 วินาที (รองรับ Vercel serverless)
   useEffect(() => {
     fetchStats()
-    const es = new EventSource(`/api/events?token=${auth.token}`)
-    es.addEventListener('update', () => { fetchCustomers(); fetchStats() })
-    es.onerror = () => es.close()
-    return () => es.close()
-  }, [auth.token, fetchCustomers, fetchStats])
+    const t = setInterval(() => { fetchCustomers(); fetchStats() }, 10000)
+    return () => clearInterval(t)
+  }, [fetchCustomers, fetchStats])
 
   useEffect(() => {
     const t = setTimeout(() => { setSearch(searchInput); setPage(1) }, 400)
