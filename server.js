@@ -2,6 +2,11 @@ import express from 'express'
 import cors from 'cors'
 import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { existsSync } from 'node:fs'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const db = new DatabaseSync('customers.db')
 const hashPwd = pwd => createHash('sha256').update(pwd).digest('hex')
@@ -222,4 +227,12 @@ app.delete('/api/customers/:id', auth, adminOnly, (req, res) => {
   res.json({ success: true })
 })
 
-app.listen(3001, () => console.log('Server: http://localhost:3001'))
+// Serve React build (production)
+const distPath = join(__dirname, 'client', 'dist')
+if (existsSync(distPath)) {
+  app.use(express.static(distPath))
+  app.get('*', (_req, res) => res.sendFile(join(distPath, 'index.html')))
+}
+
+const PORT = process.env.PORT || 3001
+app.listen(PORT, () => console.log(`Server: http://localhost:${PORT}`))
