@@ -395,7 +395,7 @@ function Modal({ title, isAdd, text, onChange, onCheck, onClose, onConfirm, onBa
               <textarea
                 ref={taRef}
                 className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 resize-none font-mono overflow-hidden"
-                style={{ minHeight: '20rem' }}
+                style={{ minHeight: '10rem', maxHeight: '50vh' }}
                 placeholder={isAdd ? 'สมชาย ใจดี\nสมหญิง รักเรียน\nมานะ พยายาม' : 'ชื่อจริง นามสกุล'}
                 value={text}
                 onChange={e => onChange(e.target.value)}
@@ -683,9 +683,25 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
     <div className="min-h-screen bg-stone-100">
       <StatsBar stats={stats} />
       <header className="bg-red-900 shadow-md">
-        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
-          <h1 className="text-lg font-bold text-amber-100">รายชื่อลูกค้า</h1>
-          <div className="flex items-center gap-2">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+          <h1 className="text-lg font-bold text-amber-100 shrink-0">รายชื่อลูกค้า</h1>
+
+          {/* Desktop nav buttons (hidden on mobile) */}
+          <div className="hidden sm:flex items-center gap-2 flex-1 justify-end">
+            <button onClick={openAdd} className="text-xs px-3 py-1.5 bg-red-800 hover:bg-red-700 text-amber-100 rounded-lg">+ เพิ่มลูกค้า</button>
+            {auth.role === 'admin' && <>
+              <button onClick={() => setShowUsers(true)} className="text-xs px-3 py-1.5 bg-red-800 hover:bg-red-700 text-amber-100 rounded-lg">ผู้ใช้งาน</button>
+              <button onClick={() => setShowSettings(true)} className="text-xs px-3 py-1.5 bg-red-800 hover:bg-red-700 text-amber-100 rounded-lg">ตั้งค่า</button>
+            </>}
+            <span className={`text-xs px-2 py-0.5 rounded-full ${auth.role === 'admin' ? 'bg-amber-600 text-white' : 'bg-red-800 text-red-200'}`}>
+              {auth.role === 'admin' ? 'Admin' : 'User'}
+            </span>
+            <span className="text-sm text-amber-200 font-medium">{auth.username}</span>
+            <button onClick={() => setShowLogoutConfirm(true)} className="text-xs px-3 py-1.5 bg-red-800 hover:bg-red-700 text-red-200 hover:text-red-100 rounded-lg">ออกจากระบบ</button>
+          </div>
+
+          {/* Mobile: username only */}
+          <div className="flex sm:hidden items-center gap-2">
             <span className={`text-xs px-2 py-0.5 rounded-full ${auth.role === 'admin' ? 'bg-amber-600 text-white' : 'bg-red-800 text-red-200'}`}>
               {auth.role === 'admin' ? 'Admin' : 'User'}
             </span>
@@ -694,7 +710,7 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6 pb-24">
+      <main className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6 pb-24 sm:pb-6">
         <div className="mb-4">
           <div className="relative w-full">
             <input
@@ -831,7 +847,7 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
       {/* Floating online badge */}
       <button
         onClick={() => auth.role === 'admin' && setShowActivityLog(true)}
-        className="fixed bottom-20 right-4 z-30 bg-stone-800 text-green-400 rounded-full px-3 py-1.5 text-xs flex items-center gap-1.5 shadow-lg"
+        className="fixed bottom-20 sm:bottom-4 right-4 z-30 bg-stone-800 text-green-400 rounded-full px-3 py-1.5 text-xs flex items-center gap-1.5 shadow-lg"
         title={auth.role === 'admin' ? 'ดูกิจกรรมผู้ใช้งาน' : undefined}
       >
         <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse inline-block" />
@@ -851,8 +867,8 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
         </div>
       )}
 
-      {/* Bottom Navigation Bar */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-stone-900 border-t border-stone-700 shadow-lg z-30 flex">
+      {/* Bottom Navigation Bar (mobile only) */}
+      <nav className="sm:hidden fixed bottom-0 left-0 right-0 bg-stone-900 border-t border-stone-700 shadow-lg z-30 flex">
         {/* หน้าหลัก */}
         <button className="flex-1 flex flex-col items-center justify-center py-2 gap-0.5 text-amber-500">
           <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
