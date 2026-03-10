@@ -223,6 +223,22 @@ app.get('/api/customers', auth, h(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1)
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50))
   const search = (req.query.search || '').trim()
+
+  if (!search) {
+    const offset = (page - 1) * limit
+    const { rows: [{ count: todayCount }] } = await pool.query(`
+      SELECT COUNT(*) as count FROM customers
+      WHERE LEFT(created_at, 10) = TO_CHAR(NOW() AT TIME ZONE 'Asia/Bangkok', 'YYYY-MM-DD')
+    `)
+    const { rows: [{ count: allCount }] } = await pool.query(`SELECT COUNT(*) as count FROM customers`)
+    const customers = await db.all(`
+      SELECT * FROM customers
+      WHERE LEFT(created_at, 10) = TO_CHAR(NOW() AT TIME ZONE 'Asia/Bangkok', 'YYYY-MM-DD')
+      ORDER BY id DESC LIMIT $1 OFFSET $2
+    `, [limit, offset])
+    return res.json({ customers, total: Number(todayCount), grandTotal: Number(allCount), page, limit, recent: true })
+  }
+
   const offset = (page - 1) * limit
   const parts = search.split(/\s+/).filter(Boolean)
   let where, params

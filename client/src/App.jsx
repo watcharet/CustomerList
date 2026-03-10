@@ -768,6 +768,7 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
   const [lastUpdated, setLastUpdated] = useState(null)
   const [online, setOnline] = useState({ count: 0, users: [] })
   const [toasts, setToasts] = useState([])
+  const [grandTotal, setGrandTotal] = useState(0)
   const searchRef = useRef(null)
 
   const focusSearch = () => setTimeout(() => searchRef.current?.focus(), 50)
@@ -782,6 +783,7 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
       const data = await res.json()
       setCustomers(data.customers)
       setTotal(data.total)
+      if (data.grandTotal !== undefined) setGrandTotal(data.grandTotal)
       setLastUpdated(new Date())
     } catch { /* ignore */ } finally {
       setLoading(false)
@@ -881,8 +883,6 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
     else fetchCustomers()
   }
 
-  const startNum = (page - 1) * LIMIT + 1
-
   return (
     <div className="min-h-screen bg-stone-100">
       <StatsBar stats={stats} />
@@ -900,10 +900,14 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
 
       <main className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6" style={{ paddingBottom: '4.5rem' }}>
         {online.users.length > 0 && (
-          <div className="flex items-center gap-2 mb-4">
-            <span className="w-2 h-2 rounded-full bg-green-400 shrink-0 animate-pulse"></span>
-            <span className="text-xs text-stone-400 shrink-0">คนที่ออนไลน์ตอนนี้ —</span>
-            <span className="text-xs text-stone-600 font-medium">{online.users.join(' · ')}</span>
+          <div className="flex items-center gap-2 flex-wrap mb-4">
+            <span className="text-xs text-stone-400 shrink-0">ออนไลน์ตอนนี้</span>
+            {online.users.map(user => (
+              <span key={user} className="flex items-center gap-1.5 bg-green-50 border border-green-200 text-green-800 text-xs font-medium px-2.5 py-1 rounded-full">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400 shrink-0 animate-pulse"></span>
+                {user}
+              </span>
+            ))}
           </div>
         )}
         <div className="mb-4">
@@ -944,8 +948,12 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
 
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-3 gap-0.5">
           <div className="text-sm text-gray-500">
-            ทั้งหมด <span className="font-semibold text-gray-700">{total.toLocaleString()}</span> รายชื่อ
-            {search && <span> · ค้นหา "{search}"</span>}
+            {!search ? (
+              <>เพิ่มวันนี้ <span className="font-semibold text-gray-700">{total.toLocaleString()}</span> รายชื่อ · จากทั้งหมด <span className="font-semibold text-gray-700">{grandTotal.toLocaleString()}</span> รายชื่อ</>
+
+            ) : (
+              <>พบ <span className="font-semibold text-gray-700">{total.toLocaleString()}</span> รายชื่อ · ค้นหา "{search}"</>
+            )}
           </div>
           {lastUpdated && (
             <span className="text-xs text-gray-400">
@@ -958,7 +966,6 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
           <table className="w-full text-xs">
             <thead className="bg-gray-50 border-b">
               <tr>
-                <th className="text-left px-3 py-2 text-gray-500 font-medium w-12">#</th>
                 <th className="text-left px-3 py-2 text-gray-500 font-medium">ชื่อจริง</th>
                 <th className="text-left px-3 py-2 text-gray-500 font-medium">นามสกุล</th>
                 <th className="px-3 py-2 w-20"></th>
@@ -966,12 +973,11 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={4} className="text-center py-8 text-gray-400">กำลังโหลด...</td></tr>
+                <tr><td colSpan={3} className="text-center py-8 text-gray-400">กำลังโหลด...</td></tr>
               ) : customers.length === 0 ? (
-                <tr><td colSpan={4} className="text-center py-8 text-gray-400">ไม่พบข้อมูล</td></tr>
-              ) : customers.map((c, i) => (
+                <tr><td colSpan={3} className="text-center py-8 text-gray-400">ไม่พบข้อมูล</td></tr>
+              ) : customers.map((c) => (
                 <tr key={c.id} className="border-t hover:bg-amber-50">
-                  <td className="px-3 py-1.5 text-gray-400">{startNum + i}</td>
                   <td className="px-3 py-1.5 text-gray-800">{c.first_name}</td>
                   <td className="px-3 py-1.5 text-gray-800">{c.last_name}</td>
                   <td className="px-3 py-1.5 text-right space-x-3">
