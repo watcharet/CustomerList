@@ -7,10 +7,17 @@ import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import fs from 'fs'
 
+if (!process.env.DATABASE_URL) {
+  console.error('ERROR: DATABASE_URL is not set')
+  process.exit(1)
+}
+
 const { Pool } = pg
+const isLocal = process.env.DATABASE_URL.includes('localhost') || process.env.DATABASE_URL.includes('127.0.0.1')
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false },
+  ssl: isLocal ? false : { rejectUnauthorized: false },
+  connectionTimeoutMillis: 10000,
 })
 
 const db = {
@@ -20,42 +27,25 @@ const db = {
 }
 
 const hashPwd = pwd => createHash('sha256').update(pwd).digest('hex')
-// เก็บเวลาในโซน Bangkok (UTC+7)
 const now = () => new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 19).replace('T', ' ')
 
-// สร้างตารางถ้ายังไม่มี
-await db.query(`
-  CREATE TABLE IF NOT EXISTS customers (
-    id SERIAL PRIMARY KEY,
-    first_name TEXT NOT NULL,
-    last_name TEXT NOT NULL,
-    created_at TEXT,
-    created_by TEXT DEFAULT ''
-  )
-`)
-await db.query(`CREATE INDEX IF NOT EXISTS idx_name ON customers (first_name, last_name)`)
-await db.query(`
-  CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
-    username TEXT NOT NULL UNIQUE,
-    password TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'user'
-  )
-`)
-
-// สร้าง admin เริ่มต้นถ้ายังไม่มี
-const adminExists = await db.one(`SELECT id FROM users WHERE username = 'AdminCL'`)
-if (!adminExists) {
-  await db.query(`INSERT INTO users (username, password, role) VALUES ($1, $2, 'admin')`, ['AdminCL', hashPwd('CL2025')])
-}
+// --- Wrap async handler ให้ catch error อัตโนมัติ ---
+const h = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
 
 const app = express()
 const sessions = new Map()
-const sseClients = new Set()
+const sseClients = new Map() // res → username
 const SESSION_TTL = 72 * 60 * 60 * 1000
 
-function broadcast() {
-  for (const client of sseClients) client.write('event: update\ndata: {}\n\n')
+function broadcast(payload = {}) {
+  const data = JSON.stringify(payload)
+  for (const client of sseClients.keys()) client.write(`event: update\ndata: ${data}\n\n`)
+}
+
+function broadcastOnline() {
+  const users = [...new Set(sseClients.values())]
+  const data = JSON.stringify({ count: users.length, users })
+  for (const client of sseClients.keys()) client.write(`event: online\ndata: ${data}\n\n`)
 }
 
 setInterval(() => {
@@ -68,7 +58,6 @@ setInterval(() => {
 app.use(cors())
 app.use(express.json())
 
-// Serve React build (production)
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const distPath = join(__dirname, 'client', 'dist')
 if (fs.existsSync(distPath)) {
@@ -92,33 +81,60 @@ function adminOnly(req, res, next) {
   next()
 }
 
+app.get('/health', (_req, res) => res.json({ status: 'ok' }))
+
+// --- Online users ---
+app.get('/api/online', auth, h(async (_req, res) => {
+  const t = Date.now()
+  const users = [...sessions.values()].filter(s => t <= s.expiresAt).map(s => s.username)
+  res.json({ count: users.length, users })
+}))
+
+// --- Activity logs (admin only) ---
+app.get('/api/admin/logs', auth, h(async (_req, res) => {
+  const logs = await db.all(`
+    SELECT * FROM activity_logs
+    WHERE created_at >= TO_CHAR(NOW() AT TIME ZONE 'Asia/Bangkok' - INTERVAL '7 days', 'YYYY-MM-DD HH24:MI:SS')
+    ORDER BY id DESC
+  `)
+  res.json(logs)
+}))
+
 // --- Auth ---
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', h(async (req, res) => {
   const { username, password } = req.body
   if (!username || !password) return res.status(400).json({ error: 'กรุณากรอกข้อมูล' })
   const user = await db.one(`SELECT * FROM users WHERE username = $1 AND password = $2`, [username.trim(), hashPwd(password)])
   if (!user) return res.status(401).json({ error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' })
   const token = randomUUID()
   sessions.set(token, { userId: user.id, username: user.username, role: user.role, expiresAt: Date.now() + SESSION_TTL })
+  await db.query(`INSERT INTO activity_logs (username, action, created_at) VALUES ($1, 'login', $2)`, [user.username, now()])
+  broadcastOnline()
   res.json({ token, username: user.username, role: user.role })
-})
+}))
 
-app.post('/api/auth/logout', auth, (req, res) => {
-  sessions.delete((req.headers.authorization || '').replace('Bearer ', ''))
+app.post('/api/auth/logout', auth, h(async (req, res) => {
+  const token = (req.headers.authorization || '').replace('Bearer ', '')
+  const username = req.user.username
+  sessions.delete(token)
+  await db.query(`INSERT INTO activity_logs (username, action, created_at) VALUES ($1, 'logout', $2)`, [username, now()])
+  broadcastOnline()
   res.json({ success: true })
-})
+}))
 
 // --- SSE ---
 app.get('/api/events', auth, (req, res) => {
   res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' })
   res.flushHeaders()
   res.write('event: connected\ndata: {}\n\n')
-  sseClients.add(res)
-  req.on('close', () => sseClients.delete(res))
+  sseClients.set(res, req.user.username)
+  broadcastOnline()
+  const ping = setInterval(() => res.write(':ping\n\n'), 25000)
+  req.on('close', () => { sseClients.delete(res); clearInterval(ping); broadcastOnline() })
 })
 
 // --- Stats ---
-app.get('/api/stats', auth, async (_req, res) => {
+app.get('/api/stats', auth, h(async (_req, res) => {
   const { rows: [{ count: today }] } = await pool.query(`
     SELECT COUNT(*) as count FROM customers
     WHERE LEFT(created_at, 10) = TO_CHAR(NOW() AT TIME ZONE 'Asia/Bangkok', 'YYYY-MM-DD')
@@ -141,15 +157,27 @@ app.get('/api/stats', auth, async (_req, res) => {
     WHERE LEFT(created_at, 7) = TO_CHAR(NOW() AT TIME ZONE 'Asia/Bangkok', 'YYYY-MM')
   `)
   res.json({ today: Number(today), todayByUser, week: Number(week), month: Number(month) })
-})
+}))
 
-// --- Users (admin only) ---
-app.get('/api/users', auth, adminOnly, async (_req, res) => {
-  const users = await db.all(`SELECT id, username, role FROM users ORDER BY role DESC, username ASC`)
-  res.json(users)
-})
+// --- 7-day leaderboard ---
+app.get('/api/stats/weekly', auth, h(async (_req, res) => {
+  const rows = await db.all(`
+    SELECT created_by, COUNT(*) as count FROM customers
+    WHERE created_at >= TO_CHAR(
+      DATE_TRUNC('day', NOW() AT TIME ZONE 'Asia/Bangkok' - INTERVAL '6 days'),
+      'YYYY-MM-DD HH24:MI:SS'
+    ) AND created_by != ''
+    GROUP BY created_by ORDER BY count DESC LIMIT 10
+  `)
+  res.json(rows)
+}))
 
-app.post('/api/users', auth, adminOnly, async (req, res) => {
+// --- Users ---
+app.get('/api/users', auth, adminOnly, h(async (_req, res) => {
+  res.json(await db.all(`SELECT id, username, role FROM users ORDER BY role DESC, username ASC`))
+}))
+
+app.post('/api/users', auth, adminOnly, h(async (req, res) => {
   const username = (req.body.username || '').trim()
   const password = (req.body.password || '').trim()
   const role = req.body.role === 'admin' ? 'admin' : 'user'
@@ -157,42 +185,78 @@ app.post('/api/users', auth, adminOnly, async (req, res) => {
   try {
     const { id } = await db.one(`INSERT INTO users (username, password, role) VALUES ($1, $2, $3) RETURNING id`, [username, hashPwd(password), role])
     res.json({ id, username, role })
-  } catch {
-    res.status(400).json({ error: 'ชื่อผู้ใช้นี้มีอยู่แล้ว' })
-  }
-})
+  } catch { res.status(400).json({ error: 'ชื่อผู้ใช้นี้มีอยู่แล้ว' }) }
+}))
 
-app.delete('/api/users/:id', auth, adminOnly, async (req, res) => {
+app.delete('/api/users/:id', auth, adminOnly, h(async (req, res) => {
   if (Number(req.params.id) === req.user.userId)
     return res.status(400).json({ error: 'ไม่สามารถลบบัญชีของตัวเองได้' })
   await db.query(`DELETE FROM users WHERE id = $1`, [Number(req.params.id)])
   res.json({ success: true })
-})
+}))
+
+// --- Duplicate check/delete (admin only) ---
+app.get('/api/customers/duplicates', auth, adminOnly, h(async (_req, res) => {
+  const rows = await db.all(`
+    SELECT id, first_name, last_name FROM customers
+    WHERE (first_name, last_name) IN (
+      SELECT first_name, last_name FROM customers
+      GROUP BY first_name, last_name HAVING COUNT(*) > 1
+    )
+    ORDER BY first_name ASC, last_name ASC, id ASC
+  `)
+  res.json(rows)
+}))
+
+app.delete('/api/customers/duplicates', auth, adminOnly, h(async (_req, res) => {
+  const { rowCount } = await pool.query(`
+    DELETE FROM customers WHERE id NOT IN (
+      SELECT MIN(id) FROM customers GROUP BY first_name, last_name
+    ) AND (first_name, last_name) IN (
+      SELECT first_name, last_name FROM customers
+      GROUP BY first_name, last_name HAVING COUNT(*) > 1
+    )
+  `)
+  broadcast()
+  res.json({ deleted: rowCount })
+}))
 
 // --- Export ---
-app.get('/api/customers/export', auth, adminOnly, async (_req, res) => {
+app.get('/api/customers/export', auth, adminOnly, h(async (_req, res) => {
   const rows = await db.all(`SELECT first_name, last_name FROM customers ORDER BY first_name ASC, last_name ASC`)
   const csv = ['first_name,last_name', ...rows.map(r => `${r.first_name},${r.last_name}`)].join('\n')
   const date = new Date().toISOString().slice(0, 10)
   res.setHeader('Content-Type', 'text/csv; charset=utf-8')
   res.setHeader('Content-Disposition', `attachment; filename="customers_${date}.csv"`)
   res.send('\uFEFF' + csv)
-})
+}))
 
 // --- Customers ---
-app.get('/api/customers', auth, async (req, res) => {
+app.get('/api/customers', auth, h(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1)
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50))
   const search = (req.query.search || '').trim()
-  const offset = (page - 1) * limit
 
+  if (!search) {
+    const offset = (page - 1) * limit
+    const { rows: [{ count: todayCount }] } = await pool.query(`
+      SELECT COUNT(*) as count FROM customers
+      WHERE LEFT(created_at, 10) = TO_CHAR(NOW() AT TIME ZONE 'Asia/Bangkok', 'YYYY-MM-DD')
+    `)
+    const { rows: [{ count: allCount }] } = await pool.query(`SELECT COUNT(*) as count FROM customers`)
+    const customers = await db.all(`
+      SELECT * FROM customers
+      WHERE LEFT(created_at, 10) = TO_CHAR(NOW() AT TIME ZONE 'Asia/Bangkok', 'YYYY-MM-DD')
+      ORDER BY id DESC LIMIT $1 OFFSET $2
+    `, [limit, offset])
+    return res.json({ customers, total: Number(todayCount), grandTotal: Number(allCount), page, limit, recent: true })
+  }
+
+  const offset = (page - 1) * limit
   const parts = search.split(/\s+/).filter(Boolean)
   let where, params
-
   if (parts.length >= 2) {
-    const fn = `%${parts[0]}%`
-    const ln = `%${parts.slice(1).join(' ')}%`
-    const full = `%${search}%`
+    const fn = `%${parts[0]}%`, ln = `%${parts.slice(1).join(' ')}%`, full = `%${search}%`
     where = '(first_name LIKE $1 AND last_name LIKE $2) OR first_name LIKE $3 OR last_name LIKE $4'
     params = [fn, ln, full, full]
   } else {
@@ -200,16 +264,15 @@ app.get('/api/customers', auth, async (req, res) => {
     where = 'first_name LIKE $1 OR last_name LIKE $2'
     params = [p, p]
   }
-
   const { rows: [{ count }] } = await pool.query(`SELECT COUNT(*) as count FROM customers WHERE ${where}`, params)
   const customers = await db.all(
     `SELECT * FROM customers WHERE ${where} ORDER BY first_name ASC, last_name ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
     [...params, limit, offset]
   )
   res.json({ customers, total: Number(count), page, limit })
-})
+}))
 
-app.post('/api/customers/check-duplicates', auth, async (req, res) => {
+app.post('/api/customers/check-duplicates', auth, h(async (req, res) => {
   const list = req.body.customers
   if (!Array.isArray(list)) return res.status(400).json({ error: 'invalid' })
   const results = await Promise.all(
@@ -218,34 +281,28 @@ app.post('/api/customers/check-duplicates', auth, async (req, res) => {
   const duplicates = [], unique = []
   list.forEach((c, i) => { if (results[i]) duplicates.push(c); else unique.push(c) })
   res.json({ duplicates, unique })
-})
+}))
 
-app.post('/api/customers/batch', auth, async (req, res) => {
+app.post('/api/customers/batch', auth, h(async (req, res) => {
   const list = req.body.customers
-  if (!Array.isArray(list) || list.length === 0)
-    return res.status(400).json({ error: 'ไม่มีข้อมูล' })
+  if (!Array.isArray(list) || list.length === 0) return res.status(400).json({ error: 'ไม่มีข้อมูล' })
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     const ts = now()
     for (const { first_name, last_name } of list) {
-      await client.query(
-        `INSERT INTO customers (first_name, last_name, created_by, created_at) VALUES ($1, $2, $3, $4)`,
-        [first_name, last_name, req.user.username, ts]
-      )
+      await client.query(`INSERT INTO customers (first_name, last_name, created_by, created_at) VALUES ($1, $2, $3, $4)`, [first_name, last_name, req.user.username, ts])
     }
     await client.query('COMMIT')
-    broadcast()
+    broadcast({ by: req.user.username, added: list.length })
     res.json({ success: true, count: list.length })
   } catch {
     await client.query('ROLLBACK')
     res.status(500).json({ error: 'บันทึกข้อมูลไม่สำเร็จ' })
-  } finally {
-    client.release()
-  }
-})
+  } finally { client.release() }
+}))
 
-app.post('/api/customers', auth, async (req, res) => {
+app.post('/api/customers', auth, h(async (req, res) => {
   const first_name = (req.body.first_name || '').trim()
   const last_name = (req.body.last_name || '').trim()
   if (!first_name || !last_name) return res.status(400).json({ error: 'กรุณากรอกชื่อและนามสกุล' })
@@ -253,35 +310,83 @@ app.post('/api/customers', auth, async (req, res) => {
     `INSERT INTO customers (first_name, last_name, created_by, created_at) VALUES ($1, $2, $3, $4) RETURNING id`,
     [first_name, last_name, req.user.username, now()]
   )
-  broadcast()
+  broadcast({ by: req.user.username, added: 1 })
   res.json({ id, first_name, last_name })
-})
+}))
 
-app.put('/api/customers/:id', auth, adminOnly, async (req, res) => {
+app.put('/api/customers/:id', auth, adminOnly, h(async (req, res) => {
   const first_name = (req.body.first_name || '').trim()
   const last_name = (req.body.last_name || '').trim()
   if (!first_name || !last_name) return res.status(400).json({ error: 'กรุณากรอกชื่อและนามสกุล' })
-  const { rowCount } = await pool.query(
-    `UPDATE customers SET first_name = $1, last_name = $2 WHERE id = $3`,
-    [first_name, last_name, Number(req.params.id)]
-  )
+  const { rowCount } = await pool.query(`UPDATE customers SET first_name = $1, last_name = $2 WHERE id = $3`, [first_name, last_name, Number(req.params.id)])
   if (rowCount === 0) return res.status(404).json({ error: 'ไม่พบข้อมูล' })
   broadcast()
   res.json({ id: Number(req.params.id), first_name, last_name })
-})
+}))
 
-app.delete('/api/customers/:id', auth, adminOnly, async (req, res) => {
+app.delete('/api/customers/:id', auth, adminOnly, h(async (req, res) => {
   await db.query(`DELETE FROM customers WHERE id = $1`, [Number(req.params.id)])
   broadcast()
   res.json({ success: true })
-})
+}))
 
-// Fallback → React SPA
 if (fs.existsSync(distPath)) {
   app.get('*', (req, res) => {
     if (!req.path.startsWith('/api')) res.sendFile(join(distPath, 'index.html'))
   })
 }
 
+// --- Global error handler (ต้องอยู่หลัง routes ทั้งหมด) ---
+app.use((err, _req, res, _next) => {
+  console.error('Unhandled error:', err.message)
+  res.status(500).json({ error: 'เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง' })
+})
+
+// --- Start server ---
 const PORT = process.env.PORT || 3001
-app.listen(PORT, () => console.log(`Server: http://localhost:${PORT}`))
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on port ${PORT}`)
+
+  ;(async () => {
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS customers (
+          id SERIAL PRIMARY KEY,
+          first_name TEXT NOT NULL,
+          last_name TEXT NOT NULL,
+          created_at TEXT,
+          created_by TEXT DEFAULT ''
+        )
+      `)
+      // Trigram index สำหรับ LIKE search เร็วขึ้น
+      await db.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`)
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_name ON customers (first_name, last_name)`)
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS activity_logs (
+          id SERIAL PRIMARY KEY,
+          username TEXT NOT NULL,
+          action TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+      `)
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_trgm_first ON customers USING GIN (first_name gin_trgm_ops)`)
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_trgm_last  ON customers USING GIN (last_name  gin_trgm_ops)`)
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS users (
+          id SERIAL PRIMARY KEY,
+          username TEXT NOT NULL UNIQUE,
+          password TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'user'
+        )
+      `)
+      const adminExists = await db.one(`SELECT id FROM users WHERE username = 'AdminCL'`)
+      if (!adminExists) {
+        await db.query(`INSERT INTO users (username, password, role) VALUES ($1, $2, 'admin')`, ['AdminCL', hashPwd('CL2025')])
+      }
+      console.log('Database initialized with trigram indexes')
+    } catch (err) {
+      console.error('Database initialization failed:', err.message)
+      process.exit(1)
+    }
+  })()
+})
