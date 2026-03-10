@@ -229,6 +229,8 @@ function UserManagement({ apiFetch, onClose }) {
 function Settings({ apiFetch, onClose }) {
   const [step, setStep] = useState('idle') // idle | checking | preview | done
   const [preview, setPreview] = useState(null)
+  const [dupStep, setDupStep] = useState('idle') // idle | checking | found | confirm | done
+  const [dupRows, setDupRows] = useState([])
   const [errors, setErrors] = useState([])
   const [importing, setImporting] = useState(false)
   const [result, setResult] = useState(null)
@@ -353,6 +355,102 @@ function Settings({ apiFetch, onClose }) {
               <div className="bg-green-50 border border-green-200 rounded-lg px-4 py-3 text-sm text-green-700">
                 นำเข้าสำเร็จ · เพิ่ม <strong>{result.added.toLocaleString()}</strong> รายชื่อ · ข้าม <strong>{result.skipped.toLocaleString()}</strong> รายชื่อ (ซ้ำ)
                 <button onClick={resetImport} className="block mt-1.5 text-xs underline text-green-600">นำเข้าไฟล์อื่น</button>
+              </div>
+            )}
+          </div>
+
+          {/* Duplicate cleanup */}
+          <div className="bg-white border rounded-xl p-4">
+            <p className="text-sm font-medium text-gray-700 mb-0.5">ตรวจสอบรายชื่อซ้ำ</p>
+            <p className="text-xs text-gray-400 mb-3">ค้นหารายชื่อที่มีชื่อและนามสกุลซ้ำกันในฐานข้อมูล</p>
+
+            {dupStep === 'idle' && (
+              <button
+                onClick={async () => {
+                  setDupStep('checking')
+                  try {
+                    const res = await apiFetch('/api/customers/duplicates')
+                    const data = await res.json()
+                    setDupRows(data)
+                    setDupStep('found')
+                  } catch { setDupStep('idle') }
+                }}
+                className="bg-stone-700 text-white px-4 py-1.5 rounded-lg text-sm hover:bg-stone-600"
+              >
+                ตรวจสอบ
+              </button>
+            )}
+
+            {dupStep === 'checking' && <p className="text-sm text-gray-400">กำลังตรวจสอบ...</p>}
+
+            {dupStep === 'found' && (
+              <>
+                {dupRows.length === 0 ? (
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm text-green-600">ไม่พบรายชื่อซ้ำ</p>
+                    <button onClick={() => setDupStep('idle')} className="text-xs text-gray-400 hover:underline">ปิด</button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-sm text-red-600 font-medium">พบรายชื่อซ้ำ {dupRows.length.toLocaleString()} รายการ</p>
+                      <button onClick={() => setDupStep('idle')} className="text-xs text-gray-400 hover:underline">ปิด</button>
+                    </div>
+                    <div className="border rounded-lg overflow-hidden mb-3 max-h-40 overflow-y-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 border-b sticky top-0">
+                          <tr>
+                            <th className="text-left px-3 py-1.5 text-gray-500 font-medium">ชื่อจริง</th>
+                            <th className="text-left px-3 py-1.5 text-gray-500 font-medium">นามสกุล</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dupRows.map(r => (
+                            <tr key={r.id} className="border-t">
+                              <td className="px-3 py-1.5 text-gray-700">{r.first_name}</td>
+                              <td className="px-3 py-1.5 text-gray-700">{r.last_name}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <button
+                      onClick={() => setDupStep('confirm')}
+                      className="bg-red-700 text-white px-4 py-1.5 rounded-lg text-sm hover:bg-red-800"
+                    >
+                      ลบรายชื่อซ้ำออก
+                    </button>
+                  </>
+                )}
+              </>
+            )}
+
+            {dupStep === 'confirm' && (
+              <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3">
+                <p className="text-sm font-medium text-red-700 mb-1">ยืนยันการลบ?</p>
+                <p className="text-xs text-red-500 mb-3">ระบบจะเก็บรายชื่อที่เพิ่มก่อน (id ต่ำสุด) และลบรายชื่อซ้ำที่เหลือออก ไม่สามารถกู้คืนได้</p>
+                <div className="flex gap-2">
+                  <button onClick={() => setDupStep('found')} className="flex-1 border rounded-lg py-1.5 text-sm bg-white hover:bg-gray-50">ยกเลิก</button>
+                  <button
+                    onClick={async () => {
+                      const res = await apiFetch('/api/customers/duplicates', { method: 'DELETE' })
+                      const data = await res.json()
+                      setDupRows([])
+                      setDupStep('done')
+                      setDupRows(data.deleted)
+                    }}
+                    className="flex-1 bg-red-700 text-white rounded-lg py-1.5 text-sm hover:bg-red-800"
+                  >
+                    ยืนยันลบ
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {dupStep === 'done' && (
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-green-600">ลบรายชื่อซ้ำสำเร็จ {typeof dupRows === 'number' ? dupRows.toLocaleString() : ''} รายการ</p>
+                <button onClick={() => { setDupStep('idle'); setDupRows([]) }} className="text-xs text-gray-400 hover:underline">ปิด</button>
               </div>
             )}
           </div>

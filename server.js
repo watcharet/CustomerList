@@ -92,7 +92,11 @@ app.get('/api/online', auth, h(async (_req, res) => {
 
 // --- Activity logs (admin only) ---
 app.get('/api/admin/logs', auth, adminOnly, h(async (_req, res) => {
-  const logs = await db.all(`SELECT * FROM activity_logs ORDER BY id DESC LIMIT 200`)
+  const logs = await db.all(`
+    SELECT * FROM activity_logs
+    WHERE created_at >= TO_CHAR(NOW() AT TIME ZONE 'Asia/Bangkok' - INTERVAL '7 days', 'YYYY-MM-DD HH24:MI:SS')
+    ORDER BY id DESC
+  `)
   res.json(logs)
 }))
 
@@ -175,6 +179,32 @@ app.delete('/api/users/:id', auth, adminOnly, h(async (req, res) => {
     return res.status(400).json({ error: 'ไม่สามารถลบบัญชีของตัวเองได้' })
   await db.query(`DELETE FROM users WHERE id = $1`, [Number(req.params.id)])
   res.json({ success: true })
+}))
+
+// --- Duplicate check/delete (admin only) ---
+app.get('/api/customers/duplicates', auth, adminOnly, h(async (_req, res) => {
+  const rows = await db.all(`
+    SELECT id, first_name, last_name FROM customers
+    WHERE (first_name, last_name) IN (
+      SELECT first_name, last_name FROM customers
+      GROUP BY first_name, last_name HAVING COUNT(*) > 1
+    )
+    ORDER BY first_name ASC, last_name ASC, id ASC
+  `)
+  res.json(rows)
+}))
+
+app.delete('/api/customers/duplicates', auth, adminOnly, h(async (_req, res) => {
+  const { rowCount } = await pool.query(`
+    DELETE FROM customers WHERE id NOT IN (
+      SELECT MIN(id) FROM customers GROUP BY first_name, last_name
+    ) AND (first_name, last_name) IN (
+      SELECT first_name, last_name FROM customers
+      GROUP BY first_name, last_name HAVING COUNT(*) > 1
+    )
+  `)
+  broadcast()
+  res.json({ deleted: rowCount })
 }))
 
 // --- Export ---
