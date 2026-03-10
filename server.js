@@ -41,6 +41,13 @@ function broadcast() {
   for (const client of sseClients) client.write('event: update\ndata: {}\n\n')
 }
 
+function broadcastOnline() {
+  const t = Date.now()
+  const users = [...sessions.values()].filter(s => t <= s.expiresAt).map(s => s.username)
+  const data = JSON.stringify({ count: users.length, users })
+  for (const client of sseClients) client.write(`event: online\ndata: ${data}\n\n`)
+}
+
 setInterval(() => {
   const t = Date.now()
   for (const [token, session] of sessions) {
@@ -76,6 +83,19 @@ function adminOnly(req, res, next) {
 
 app.get('/health', (_req, res) => res.json({ status: 'ok' }))
 
+// --- Online users ---
+app.get('/api/online', auth, h(async (_req, res) => {
+  const t = Date.now()
+  const users = [...sessions.values()].filter(s => t <= s.expiresAt).map(s => s.username)
+  res.json({ count: users.length, users })
+}))
+
+// --- Activity logs (admin only) ---
+app.get('/api/admin/logs', auth, adminOnly, h(async (_req, res) => {
+  const logs = await db.all(`SELECT * FROM activity_logs ORDER BY id DESC LIMIT 200`)
+  res.json(logs)
+}))
+
 // --- Auth ---
 app.post('/api/auth/login', h(async (req, res) => {
   const { username, password } = req.body
@@ -84,13 +104,19 @@ app.post('/api/auth/login', h(async (req, res) => {
   if (!user) return res.status(401).json({ error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' })
   const token = randomUUID()
   sessions.set(token, { userId: user.id, username: user.username, role: user.role, expiresAt: Date.now() + SESSION_TTL })
+  await db.query(`INSERT INTO activity_logs (username, action, created_at) VALUES ($1, 'login', $2)`, [user.username, now()])
+  broadcastOnline()
   res.json({ token, username: user.username, role: user.role })
 }))
 
-app.post('/api/auth/logout', auth, (req, res) => {
-  sessions.delete((req.headers.authorization || '').replace('Bearer ', ''))
+app.post('/api/auth/logout', auth, h(async (req, res) => {
+  const token = (req.headers.authorization || '').replace('Bearer ', '')
+  const username = req.user.username
+  sessions.delete(token)
+  await db.query(`INSERT INTO activity_logs (username, action, created_at) VALUES ($1, 'logout', $2)`, [username, now()])
+  broadcastOnline()
   res.json({ success: true })
-})
+}))
 
 // --- SSE ---
 app.get('/api/events', auth, (req, res) => {
@@ -98,7 +124,8 @@ app.get('/api/events', auth, (req, res) => {
   res.flushHeaders()
   res.write('event: connected\ndata: {}\n\n')
   sseClients.add(res)
-  req.on('close', () => sseClients.delete(res))
+  const ping = setInterval(() => res.write(':ping\n\n'), 25000)
+  req.on('close', () => { sseClients.delete(res); clearInterval(ping) })
 })
 
 // --- Stats ---
@@ -274,6 +301,14 @@ app.listen(PORT, '0.0.0.0', () => {
       // Trigram index สำหรับ LIKE search เร็วขึ้น
       await db.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`)
       await db.query(`CREATE INDEX IF NOT EXISTS idx_name ON customers (first_name, last_name)`)
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS activity_logs (
+          id SERIAL PRIMARY KEY,
+          username TEXT NOT NULL,
+          action TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+      `)
       await db.query(`CREATE INDEX IF NOT EXISTS idx_trgm_first ON customers USING GIN (first_name gin_trgm_ops)`)
       await db.query(`CREATE INDEX IF NOT EXISTS idx_trgm_last  ON customers USING GIN (last_name  gin_trgm_ops)`)
       await db.query(`

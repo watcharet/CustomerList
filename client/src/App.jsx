@@ -571,7 +571,6 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
   const [showSettings, setShowSettings] = useState(false)
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
   const [showActivityLog, setShowActivityLog] = useState(false)
-  const [onlineCount, setOnlineCount] = useState(0)
   const [stats, setStats] = useState(null)
   const [lastUpdated, setLastUpdated] = useState(null)
   const searchRef = useRef(null)
@@ -608,13 +607,10 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
   // SSE: รับ push event จาก server
   useEffect(() => {
     fetchStats()
-    apiFetch('/api/online').then(r => r.ok && r.json()).then(d => d && setOnlineCount(d.count))
     const es = new EventSource(`/api/events?token=${auth.token}`)
     es.addEventListener('update', () => { fetchCustomers(); fetchStats() })
-    es.addEventListener('online', e => { setOnlineCount(JSON.parse(e.data).count) })
-    es.onerror = () => es.close()
     return () => es.close()
-  }, [auth.token, fetchCustomers, fetchStats, apiFetch])
+  }, [auth.token, fetchCustomers, fetchStats])
 
   useEffect(() => {
     const t = setTimeout(() => { setSearch(searchInput); setPage(1) }, 400)
@@ -694,7 +690,7 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6 pb-24">
+      <main className="max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6" style={{ paddingBottom: '4.5rem' }}>
         <div className="mb-4">
           <div className="relative w-full">
             <input
@@ -828,16 +824,6 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
         <ActivityLog apiFetch={apiFetch} onClose={() => setShowActivityLog(false)} />
       )}
 
-      {/* Floating online badge */}
-      <button
-        onClick={() => auth.role === 'admin' && setShowActivityLog(true)}
-        className="fixed bottom-20 right-4 z-30 bg-stone-800 text-green-400 rounded-full px-3 py-1.5 text-xs flex items-center gap-1.5 shadow-lg"
-        title={auth.role === 'admin' ? 'ดูกิจกรรมผู้ใช้งาน' : undefined}
-      >
-        <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse inline-block" />
-        {onlineCount} คนออนไลน์
-      </button>
-
       {showLogoutConfirm && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl p-6 max-w-xs w-full">
@@ -876,6 +862,16 @@ function CustomerApp({ auth, apiFetch, onLogout }) {
               <path strokeLinecap="round" strokeLinejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
             <span className="text-xs">ผู้ใช้</span>
+          </button>
+        )}
+
+        {/* ประวัติกิจกรรม (admin only) */}
+        {auth.role === 'admin' && (
+          <button onClick={() => setShowActivityLog(true)} className="flex-1 flex flex-col items-center justify-center py-2 gap-0.5 text-stone-400 hover:text-amber-500 active:text-amber-400">
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+            </svg>
+            <span className="text-xs">ประวัติ</span>
           </button>
         )}
 
