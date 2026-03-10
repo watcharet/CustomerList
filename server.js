@@ -29,6 +29,9 @@ const db = {
 const hashPwd = pwd => createHash('sha256').update(pwd).digest('hex')
 const now = () => new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 19).replace('T', ' ')
 
+// --- Wrap async handler ให้ catch error อัตโนมัติ ---
+const h = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+
 const app = express()
 const sessions = new Map()
 const sseClients = new Set()
@@ -71,11 +74,10 @@ function adminOnly(req, res, next) {
   next()
 }
 
-// Health check (ไม่ต้องผ่าน auth)
 app.get('/health', (_req, res) => res.json({ status: 'ok' }))
 
 // --- Auth ---
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', h(async (req, res) => {
   const { username, password } = req.body
   if (!username || !password) return res.status(400).json({ error: 'กรุณากรอกข้อมูล' })
   const user = await db.one(`SELECT * FROM users WHERE username = $1 AND password = $2`, [username.trim(), hashPwd(password)])
@@ -83,7 +85,7 @@ app.post('/api/auth/login', async (req, res) => {
   const token = randomUUID()
   sessions.set(token, { userId: user.id, username: user.username, role: user.role, expiresAt: Date.now() + SESSION_TTL })
   res.json({ token, username: user.username, role: user.role })
-})
+}))
 
 app.post('/api/auth/logout', auth, (req, res) => {
   sessions.delete((req.headers.authorization || '').replace('Bearer ', ''))
@@ -100,7 +102,7 @@ app.get('/api/events', auth, (req, res) => {
 })
 
 // --- Stats ---
-app.get('/api/stats', auth, async (_req, res) => {
+app.get('/api/stats', auth, h(async (_req, res) => {
   const { rows: [{ count: today }] } = await pool.query(`
     SELECT COUNT(*) as count FROM customers
     WHERE LEFT(created_at, 10) = TO_CHAR(NOW() AT TIME ZONE 'Asia/Bangkok', 'YYYY-MM-DD')
@@ -123,14 +125,14 @@ app.get('/api/stats', auth, async (_req, res) => {
     WHERE LEFT(created_at, 7) = TO_CHAR(NOW() AT TIME ZONE 'Asia/Bangkok', 'YYYY-MM')
   `)
   res.json({ today: Number(today), todayByUser, week: Number(week), month: Number(month) })
-})
+}))
 
 // --- Users ---
-app.get('/api/users', auth, adminOnly, async (_req, res) => {
+app.get('/api/users', auth, adminOnly, h(async (_req, res) => {
   res.json(await db.all(`SELECT id, username, role FROM users ORDER BY role DESC, username ASC`))
-})
+}))
 
-app.post('/api/users', auth, adminOnly, async (req, res) => {
+app.post('/api/users', auth, adminOnly, h(async (req, res) => {
   const username = (req.body.username || '').trim()
   const password = (req.body.password || '').trim()
   const role = req.body.role === 'admin' ? 'admin' : 'user'
@@ -139,27 +141,27 @@ app.post('/api/users', auth, adminOnly, async (req, res) => {
     const { id } = await db.one(`INSERT INTO users (username, password, role) VALUES ($1, $2, $3) RETURNING id`, [username, hashPwd(password), role])
     res.json({ id, username, role })
   } catch { res.status(400).json({ error: 'ชื่อผู้ใช้นี้มีอยู่แล้ว' }) }
-})
+}))
 
-app.delete('/api/users/:id', auth, adminOnly, async (req, res) => {
+app.delete('/api/users/:id', auth, adminOnly, h(async (req, res) => {
   if (Number(req.params.id) === req.user.userId)
     return res.status(400).json({ error: 'ไม่สามารถลบบัญชีของตัวเองได้' })
   await db.query(`DELETE FROM users WHERE id = $1`, [Number(req.params.id)])
   res.json({ success: true })
-})
+}))
 
 // --- Export ---
-app.get('/api/customers/export', auth, adminOnly, async (_req, res) => {
+app.get('/api/customers/export', auth, adminOnly, h(async (_req, res) => {
   const rows = await db.all(`SELECT first_name, last_name FROM customers ORDER BY first_name ASC, last_name ASC`)
   const csv = ['first_name,last_name', ...rows.map(r => `${r.first_name},${r.last_name}`)].join('\n')
   const date = new Date().toISOString().slice(0, 10)
   res.setHeader('Content-Type', 'text/csv; charset=utf-8')
   res.setHeader('Content-Disposition', `attachment; filename="customers_${date}.csv"`)
   res.send('\uFEFF' + csv)
-})
+}))
 
 // --- Customers ---
-app.get('/api/customers', auth, async (req, res) => {
+app.get('/api/customers', auth, h(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1)
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50))
   const search = (req.query.search || '').trim()
@@ -181,9 +183,9 @@ app.get('/api/customers', auth, async (req, res) => {
     [...params, limit, offset]
   )
   res.json({ customers, total: Number(count), page, limit })
-})
+}))
 
-app.post('/api/customers/check-duplicates', auth, async (req, res) => {
+app.post('/api/customers/check-duplicates', auth, h(async (req, res) => {
   const list = req.body.customers
   if (!Array.isArray(list)) return res.status(400).json({ error: 'invalid' })
   const results = await Promise.all(
@@ -192,9 +194,9 @@ app.post('/api/customers/check-duplicates', auth, async (req, res) => {
   const duplicates = [], unique = []
   list.forEach((c, i) => { if (results[i]) duplicates.push(c); else unique.push(c) })
   res.json({ duplicates, unique })
-})
+}))
 
-app.post('/api/customers/batch', auth, async (req, res) => {
+app.post('/api/customers/batch', auth, h(async (req, res) => {
   const list = req.body.customers
   if (!Array.isArray(list) || list.length === 0) return res.status(400).json({ error: 'ไม่มีข้อมูล' })
   const client = await pool.connect()
@@ -211,9 +213,9 @@ app.post('/api/customers/batch', auth, async (req, res) => {
     await client.query('ROLLBACK')
     res.status(500).json({ error: 'บันทึกข้อมูลไม่สำเร็จ' })
   } finally { client.release() }
-})
+}))
 
-app.post('/api/customers', auth, async (req, res) => {
+app.post('/api/customers', auth, h(async (req, res) => {
   const first_name = (req.body.first_name || '').trim()
   const last_name = (req.body.last_name || '').trim()
   if (!first_name || !last_name) return res.status(400).json({ error: 'กรุณากรอกชื่อและนามสกุล' })
@@ -223,9 +225,9 @@ app.post('/api/customers', auth, async (req, res) => {
   )
   broadcast()
   res.json({ id, first_name, last_name })
-})
+}))
 
-app.put('/api/customers/:id', auth, adminOnly, async (req, res) => {
+app.put('/api/customers/:id', auth, adminOnly, h(async (req, res) => {
   const first_name = (req.body.first_name || '').trim()
   const last_name = (req.body.last_name || '').trim()
   if (!first_name || !last_name) return res.status(400).json({ error: 'กรุณากรอกชื่อและนามสกุล' })
@@ -233,13 +235,13 @@ app.put('/api/customers/:id', auth, adminOnly, async (req, res) => {
   if (rowCount === 0) return res.status(404).json({ error: 'ไม่พบข้อมูล' })
   broadcast()
   res.json({ id: Number(req.params.id), first_name, last_name })
-})
+}))
 
-app.delete('/api/customers/:id', auth, adminOnly, async (req, res) => {
+app.delete('/api/customers/:id', auth, adminOnly, h(async (req, res) => {
   await db.query(`DELETE FROM customers WHERE id = $1`, [Number(req.params.id)])
   broadcast()
   res.json({ success: true })
-})
+}))
 
 if (fs.existsSync(distPath)) {
   app.get('*', (req, res) => {
@@ -247,12 +249,17 @@ if (fs.existsSync(distPath)) {
   })
 }
 
-// --- Start server ก่อน แล้วค่อย init DB ---
+// --- Global error handler (ต้องอยู่หลัง routes ทั้งหมด) ---
+app.use((err, _req, res, _next) => {
+  console.error('Unhandled error:', err.message)
+  res.status(500).json({ error: 'เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง' })
+})
+
+// --- Start server ---
 const PORT = process.env.PORT || 3001
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`)
 
-  // Init DB หลัง server ขึ้นแล้ว
   ;(async () => {
     try {
       await db.query(`
@@ -264,7 +271,11 @@ app.listen(PORT, '0.0.0.0', () => {
           created_by TEXT DEFAULT ''
         )
       `)
+      // Trigram index สำหรับ LIKE search เร็วขึ้น
+      await db.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`)
       await db.query(`CREATE INDEX IF NOT EXISTS idx_name ON customers (first_name, last_name)`)
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_trgm_first ON customers USING GIN (first_name gin_trgm_ops)`)
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_trgm_last  ON customers USING GIN (last_name  gin_trgm_ops)`)
       await db.query(`
         CREATE TABLE IF NOT EXISTS users (
           id SERIAL PRIMARY KEY,
@@ -277,7 +288,7 @@ app.listen(PORT, '0.0.0.0', () => {
       if (!adminExists) {
         await db.query(`INSERT INTO users (username, password, role) VALUES ($1, $2, 'admin')`, ['AdminCL', hashPwd('CL2025')])
       }
-      console.log('Database initialized')
+      console.log('Database initialized with trigram indexes')
     } catch (err) {
       console.error('Database initialization failed:', err.message)
       process.exit(1)
